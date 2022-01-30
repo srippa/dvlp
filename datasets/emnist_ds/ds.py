@@ -13,8 +13,8 @@ import h5py
 import numpy as np
 import toml
 
-from .base_data_module import _download_raw_dataset, BaseDataModule, load_and_print_info
-from .utils import BaseDataset, split_dataset
+from datasets.base_data_module import _download_raw_dataset, BaseDataModule, load_and_print_info
+from datasets.utils import BaseDataset, split_dataset
 
 NUM_SPECIAL_TOKENS = 4
 SAMPLE_TO_BALANCE = True  # If true, take at most the mean number of instances per class.
@@ -23,9 +23,9 @@ TRAIN_FRAC = 0.8
 print('******** ', Path(__file__).resolve())
 
 RAW_DATA_DIRNAME = BaseDataModule.data_dirname()
-METADATA_FILENAME = RAW_DATA_DIRNAME / "metadata.toml"
-DL_DATA_DIRNAME = BaseDataModule.data_dirname() / "downloaded" / "emnist"
-PROCESSED_DATA_DIRNAME = BaseDataModule.data_dirname() / "processed" / "emnist"
+METADATA_FILENAME =  Path(__file__).parents[0].resolve() / "metadata.toml"
+DL_DATA_DIRNAME = Path(__file__).parents[0].resolve() / "downloaded" / "emnist"
+PROCESSED_DATA_DIRNAME = Path(__file__).parents[0].resolve() / "processed" / "emnist"
 PROCESSED_DATA_FILENAME = PROCESSED_DATA_DIRNAME / "byclass.h5"
 ESSENTIALS_FILENAME = Path(__file__).parents[0].resolve() / "emnist_essentials.json"
 
@@ -47,6 +47,8 @@ class EMNIST(BaseDataModule):
             _download_and_process_emnist()
         with open(ESSENTIALS_FILENAME) as f:
             essentials = json.load(f)
+
+        print('---- ',essentials)
         self.mapping = list(essentials["characters"])
         self.inverse_mapping = {v: k for k, v in enumerate(self.mapping)}
         self.transform = transforms.Compose([transforms.ToTensor()])

@@ -22,11 +22,7 @@ TRAIN_FRAC = 0.8
 
 print('******** ', Path(__file__).resolve())
 
-RAW_DATA_DIRNAME = BaseDataModule.data_dirname()
 METADATA_FILENAME =  Path(__file__).parents[0].resolve() / "metadata.toml"
-DL_DATA_DIRNAME = Path(__file__).parents[0].resolve() / "downloaded" / "emnist"
-PROCESSED_DATA_DIRNAME = Path(__file__).parents[0].resolve() / "processed" / "emnist"
-PROCESSED_DATA_FILENAME = PROCESSED_DATA_DIRNAME / "byclass.h5"
 ESSENTIALS_FILENAME = Path(__file__).parents[0].resolve() / "emnist_essentials.json"
 
 
@@ -40,13 +36,18 @@ class EMNIST(BaseDataModule):
     EMNIST ByClass: 814,255 characters. 62 unbalanced classes.
     """
 
-    def __init__(self, args=None):
+    def __init__(self, data_root_dir, args=None):
         super().__init__(args)
 
+        self.DL_DATA_DIRNAME = data_root_dir / "downloaded" / "emnist"
+        self.PROCESSED_DATA_DIRNAME = data_root_dir / "processed" / "emnist"
+        self.PROCESSED_DATA_FILENAME = data_root_dir / "byclass.h5"
+
         if not os.path.exists(ESSENTIALS_FILENAME):
-            _download_and_process_emnist()
+            _download_and_process_emnist(self.DL_DATA_DIRNAME, self.PROCESSED_DATA_DIRNAME, self.PROCESSED_DATA_FILENAME)
         with open(ESSENTIALS_FILENAME) as f:
             essentials = json.load(f)
+
 
         print('---- ',essentials)
         self.mapping = list(essentials["characters"])
@@ -56,14 +57,14 @@ class EMNIST(BaseDataModule):
         self.output_dims = (1,)
 
     def prepare_data(self, *args, **kwargs) -> None:
-        if not os.path.exists(PROCESSED_DATA_FILENAME):
-            _download_and_process_emnist()
+        if not os.path.exists(self.PROCESSED_DATA_FILENAME):
+            _download_and_process_emnist(self.DL_DATA_DIRNAME, self.PROCESSED_DATA_DIRNAME, self.PROCESSED_DATA_FILENAME)
         with open(ESSENTIALS_FILENAME) as f:
             _essentials = json.load(f)
 
     def setup(self, stage: str = None) -> None:
         if stage == "fit" or stage is None:
-            with h5py.File(PROCESSED_DATA_FILENAME, "r") as f:
+            with h5py.File(self.PROCESSED_DATA_FILENAME, "r") as f:
                 self.x_trainval = f["x_train"][:]
                 self.y_trainval = f["y_train"][:].squeeze().astype(int)
 
@@ -71,7 +72,7 @@ class EMNIST(BaseDataModule):
             self.data_train, self.data_val = split_dataset(base_dataset=data_trainval, fraction=TRAIN_FRAC, seed=42)
 
         if stage == "test" or stage is None:
-            with h5py.File(PROCESSED_DATA_FILENAME, "r") as f:
+            with h5py.File(self.PROCESSED_DATA_FILENAME, "r") as f:
                 self.x_test = f["x_test"][:]
                 self.y_test = f["y_test"][:].squeeze().astype(int)
             self.data_test = BaseDataset(self.x_test, self.y_test, transform=self.transform)
@@ -90,13 +91,13 @@ class EMNIST(BaseDataModule):
         return basic + data
 
 
-def _download_and_process_emnist():
+def _download_and_process_emnist(dl_data_dir, processed_dir, processed_file):
     metadata = toml.load(METADATA_FILENAME)
-    _download_raw_dataset(metadata, DL_DATA_DIRNAME)
-    _process_raw_dataset(metadata["filename"], DL_DATA_DIRNAME)
+    _download_raw_dataset(metadata, dl_data_dir)
+    _process_raw_dataset(metadata["filename"], dl_data_dir, processed_dir, processed_file)
 
 
-def _process_raw_dataset(filename: str, dirname: Path):
+def _process_raw_dataset(filename: str, dirname: Path, processed_dir: Path, processed_file: Path):
     print("Unzipping EMNIST...")
     curdir = os.getcwd()
     os.chdir(dirname)
@@ -121,8 +122,8 @@ def _process_raw_dataset(filename: str, dirname: Path):
         x_test, y_test = _sample_to_balance(x_test, y_test)
 
     print("Saving to HDF5 in a compressed format...")
-    PROCESSED_DATA_DIRNAME.mkdir(parents=True, exist_ok=True)
-    with h5py.File(PROCESSED_DATA_FILENAME, "w") as f:
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    with h5py.File(processed_file, "w") as f:
         f.create_dataset("x_train", data=x_train, dtype="u1", compression="lzf")
         f.create_dataset("y_train", data=y_train, dtype="u1", compression="lzf")
         f.create_dataset("x_test", data=x_test, dtype="u1", compression="lzf")

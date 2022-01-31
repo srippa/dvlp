@@ -85,8 +85,8 @@ class CNN(nn.Module):
         # self.conv1 = ConvBlock(input_dims[0], conv_dim)
         # self.conv2 = ConvBlock(conv_dim, conv_dim)
 
-        self.conv1 = ConvBlock(input_dims[0], conv_dim)
-        self.conv2 = ConvBlock(conv_dim, conv_dim)
+        self.conv1 = ResBlock(input_dims[0], conv_dim)
+        self.conv2 = ResBlock(conv_dim, conv_dim)
 
         self.dropout = nn.Dropout(0.25)
         self.max_pool = nn.MaxPool2d(2)

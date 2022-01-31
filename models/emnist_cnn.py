@@ -11,8 +11,36 @@ FC_DIM = 128
 IMAGE_SIZE = 28
 
 
-def aaa():
-  pass
+def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
+    """3x3 convolution with padding"""
+    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
+                     padding=dilation, groups=groups, bias=False, dilation=dilation)
+
+
+def conv1x1(in_planes, out_planes, stride=1):
+    """1x1 convolution"""
+    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
+
+
+class ResBlock(nn.Module):
+    def __init__(self, inplanes, planes):
+        super(ResBlock, self).__init__()
+        self.conv1 = conv3x3(inplanes, planes, stride=1)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = conv3x3(planes, planes)
+        self.stride = 1
+
+    def forward(self, x):
+        identity = x
+
+        out = self.conv1(x)
+        out = self.relu(out)
+        out = self.conv2(out)
+        out += identity
+        out = self.relu(out)
+
+        return out
+
 
 class ConvBlock(nn.Module):
     """
@@ -54,8 +82,12 @@ class CNN(nn.Module):
         conv_dim = self.args.get("conv_dim", CONV_DIM)
         fc_dim = self.args.get("fc_dim", FC_DIM)
 
+        # self.conv1 = ConvBlock(input_dims[0], conv_dim)
+        # self.conv2 = ConvBlock(conv_dim, conv_dim)
+
         self.conv1 = ConvBlock(input_dims[0], conv_dim)
         self.conv2 = ConvBlock(conv_dim, conv_dim)
+
         self.dropout = nn.Dropout(0.25)
         self.max_pool = nn.MaxPool2d(2)
 

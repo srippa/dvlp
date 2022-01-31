@@ -11,6 +11,9 @@ FC_DIM = 128
 IMAGE_SIZE = 28
 
 
+def aaa():
+  pass
+
 class ConvBlock(nn.Module):
     """
     Simple 3x3 conv with padding size 1 (to leave the input size unchanged), followed by a ReLU.

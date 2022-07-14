@@ -23,3 +23,4 @@ pythreejs
 ipyvolume
 spacy=3.2
 torchtext=0.12
+pyransac3d

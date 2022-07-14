@@ -65,14 +65,20 @@ def random_trans33():
     return np.random.rand(3,1)
 
 class SO3:
-    def __init__(self):
-        self._rot_mat = None
+    def __init__(self, R):
+        self._rot_mat = R
+        self._assert()
 
     @property
     def R(self):
         return self._rot_mat
 
-    def from_rotvec(self, rotation_vector: np.ndarray):
+    @staticmethod
+    def from_matrix(R: np.ndarray):
+        return SO3(R)
+
+    @staticmethod
+    def from_rotvec(rotation_vector: np.ndarray):
         """define rotation from [rotation vector](https://en.wikipedia.org/wiki/Axis%E2%80%93angle_representation#Rotation_vector)
 
         Args:
@@ -80,35 +86,17 @@ class SO3:
         Returns:
             SO3: element of SO3
         """
-        self._rot_mat = srot.from_rotvec(rotation_vector).as_matrix()
-
-        self._assert()
-        return self
-
-    def from_matrix(self, rot_mat: np.ndarray):
-        """define from rotation matrix
-
-        Args:
-            rot_mat (np.ndarray): 3x3 rotation matrix
-
-        Returns:
-            SO3: element of SE3
-        """
-        self._rot_mat = rot_mat
-
-        self._assert()
-        return self
+        return SO3(srot.from_rotvec(rotation_vector).as_matrix())
         
-    def from_quat(self, q: np.ndarray):
+    @staticmethod
+    def from_quat(q: np.ndarray):
         """Define SO3 from [unit quaternions](https://en.wikipedia.org/wiki/Quaternions_and_spatial_rotation)
 
         Args:
             q (np.ndarray): 4x1 unit quaternion in the [x,y,z,w] ordering (as scipy.transformation)
         """
-        self._rot_mat = srot.from_quat(q).as_matrix()
+        return SO3(srot.from_quat(q).as_matrix())
         
-        self._assert()
-        return self
 
     def as_matrix(self) -> np.ndarray:
         """Return matrix representatio 
@@ -186,11 +174,23 @@ class SO3:
 
 
 class SE3:
-    def __init__(self):
-        self._so3 = None
-        self._t = None
-        self._se3_mat = None
-        self._twist = None
+    def __init__(self, R:np.array, t:np.array):
+        """Define from a rotation matrix and a translation vector
+
+        Args:
+            r (np.ndarray): 3x3 rotation matrix
+            t (np.ndarray): 3x1 translation vector 
+        """
+        self._se3_mat = np.eye(4)
+        self._se3_mat[:3, :3] = R
+        self._se3_mat[:3, 3] = t
+
+        self._so3 = SO3.from_matrix(R)
+        self._t = t
+
+        w = self._so3.as_rotvec()
+        self._twist = [t[0], t[1], t[2], w[0], w[1], w[2]]
+        self._assert()
 
     @property
     def R(self):
@@ -208,7 +208,8 @@ class SE3:
     def angular_velocity(self):
         return self._twist[3:]
 
-    def from_matrix(self, rigid_mat: np.ndarray):
+    @staticmethod
+    def from_matrix(rigid_mat: np.ndarray):
         """define from rigid body matrix
 
         Args:
@@ -219,10 +220,11 @@ class SE3:
         """
         r = rigid_mat[:3,:3]
         t = rigid_mat[:3,3]
-        return self.from_rot_trans(r, t)
+        return SE3(r, t)
 
 
-    def from_twist(self, twist: np.ndarray):
+    @staticmethod
+    def from_twist(twist: np.ndarray):
         """define rigin body motion from a twist vector 
 
         Args:
@@ -233,28 +235,39 @@ class SE3:
         v = twist[:3]
         w = twist[3:]
 
-        rot = SO3().from_rotvec(w).as_matrix()
-        return self.from_rot_trans(rot, v)
+        R = SO3().from_rotvec(w).as_matrix()
+        return SE3(R,v)
 
-
-    def from_rot_trans(self, r: np.ndarray, t: np.ndarray):
-        """Define from a rotation matrix and a translation vector
+    def from_rotvec_trans(self, rotvec: np.ndarray, trans: np.ndarray):
+        """define rigin body motion from a twist vector 
 
         Args:
-            r (np.ndarray): 3x3 rotation matrix
-            t (np.ndarray): 3x1 translation vector 
+            twist vector (np.ndarray): a 6x1 vector [v,w] composed of a 3D linear velocity vector v and 3D angular velocity vector w
+        Returns:
+            SE3: element of SE2
         """
-        self._se3_mat = np.eye(4)
-        self._se3_mat[:3, :3] = r
-        self._se3_mat[:3, 3] = t
+        rot = SO3().from_rotvec(rotvec).as_matrix()
+        return SE3(rot, trans)
 
-        self._so3 = SO3().from_matrix(r)
-        self._t = t
 
-        w = self._so3.as_rotvec()
-        self._twist = [t[0], t[1], t[2], w[0], w[1], w[2]]
+    # def from_rot_trans(self, r: np.ndarray, t: np.ndarray):
+    #     """Define from a rotation matrix and a translation vector
 
-        return self
+    #     Args:
+    #         r (np.ndarray): 3x3 rotation matrix
+    #         t (np.ndarray): 3x1 translation vector 
+    #     """
+    #     self._se3_mat = np.eye(4)
+    #     self._se3_mat[:3, :3] = r
+    #     self._se3_mat[:3, 3] = t
+
+    #     self._so3 = SO3().from_matrix(r)
+    #     self._t = t
+
+    #     w = self._so3.as_rotvec()
+    #     self._twist = [t[0], t[1], t[2], w[0], w[1], w[2]]
+
+    #     return self
 
     def as_matrix(self):
         """return as 4x4 matrix
@@ -271,7 +284,7 @@ class SE3:
     def inverse(self):
         r_inv = self._so3.inverse().as_matrix()
         t_inv = -r_inv.dot(self._t)
-        return SE3().from_rot_trans(r_inv, t_inv)
+        return SE3(r_inv, t_inv)
 
     def relative(self, other):
         """ get the relative SE3 pose to other

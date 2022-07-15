@@ -403,6 +403,27 @@ class Camera:
 
         return Camera(camera_intrinsics, R, translation_vector)
 
+    def project_camera_plane_to_image_plane(self, pc: np.array):
+        K = self.camera_intrinsics.K(use_homogenous_coordinates=False)
+        fx = K[0,0]
+        fy = K[1,1]
+        cx = K[0,2]
+        cy = K[1,2]
+        x_pix = fx*pc[0] + cx
+        y_pix = fy*pc[1] + cy
+        return np.array([x_pix, y_pix])
+
+    def project_image_plane_to_camera_plane(self, pu: np.array):
+        K = self.camera_intrinsics.K(use_homogenous_coordinates=False)
+        fx = K[0,0]
+        fy = K[1,1]
+        cx = K[0,2]
+        cy = K[1,2]
+        
+        xc = (pu[0] - cx)/fx
+        yc = (pu[1] - cy)/fy
+        return np.array([xc, yc])
+
     def project_3d(self, pw: np.array):
         """project a 3D vector by a pure pinhole projection
            See Szeliski, 2.1
@@ -431,7 +452,7 @@ class Camera:
         disparity = p_out[3]
         return p2d, disparity
 
-    def project_3d_with_distortions(self, pw: np.array):
+    def project_point(self, pw: np.array):
         """project a 3D vector by a pure pinhole projection
            See Szeliski, 2.1
 
@@ -454,11 +475,31 @@ class Camera:
 
         # see line 854 in https://github.com/colmap/colmap/blob/dev/src/base/camera_models.h
 
-        p_camera_coord_2d_distorted, disparity = self.project_3d_to_camera_plane(pw)
-        p_camera_coord_2d_undistorted = self.undistort(p_camera_coord_2d_distorted)
-        p_pixels = self.project_camera_plane_to_image_plane(p_camera_coord_2d_undistorted)
+        pc_undistorted, disparity = self.project_3d_to_camera_plane(pw)       # from3d world coordinates to 2D camera plane cordinates
+        pc_distorted = self.distort(pc_undistorted)                           # distort point using distortion coefficients and model
+        pu = self.project_camera_plane_to_image_plane(pc_distorted)           # transform to 2D pixel coordinates
 
-        return p_pixels, disparity
+        return pu, disparity
+
+    def reproject_point(self, pu: np.array, disparity=None):
+        """project a 3D vector by a pure pinhole projection
+           See Szeliski, 2.1
+
+        Args:
+            pw (np.array): 3D vector in homogenous coordinates, represented as 4D array
+
+        Raises:
+            ValueError: _description_
+            ValueError: _description_
+
+        Returns:
+            np.array: _description_
+        """
+        pc_distorted = self.project_image_plane_to_camera_plane(pu)                # from 2d pixel coordinates to 2D camera plane
+        pc_undistorted = self.undistort(pc_distorted)                              # undistors with inverse lens distortions
+        p3d = self.project_camera_plane_to_3d(pc_undistorted, disparity)           # from 2D camera plane to 3D point, usign the disparity (inverse depth)
+
+        return p3d
 
     def project_3d_to_camera_plane(self, pw: np.array):
         """project a 3D vector
@@ -475,7 +516,62 @@ class Camera:
 
         return np.array([xc,yc]), disparity
 
-    def undistort(self, p_cam_distorted: np.array):
+    def project_camera_plane_to_3d(self, pc: np.array, disparity=None):
+        """project a 3D vector
+           See Szeliski, 2.1
+
+        Args:
+            pw (np.array): 4D vector of a world 3D point 
+        """
+
+        pc_3d = np.array([pc[0]/disparity, pc[1]/disparity,1./disparity,1])
+
+        p_3d = np.linalg.inv(self.extrinsics) @ pc_3d
+
+        return p_3d
+
+    def undistort_camera(self):
+        # UndistortImage: See line 937 of https://github.com/colmap/colmap/blob/dev/src/base/undistortion.cc
+        #   calls to UndistortCamera: (line 752) returning undistored camera
+        #   clalls WarpImageBetweenCameras
+        pass
+
+    def undistort(self, pc_distorted: np.array):
+        eps =np.finfo(np.float64).eps
+
+        kNumIterations = 100
+        kMaxStepNorm = np.float32(1e-10)
+        kRelStepSize = np.float32(1e-6)
+
+        J = np.eye(2)
+        x0 = pc_distorted.copy()
+        x = pc_distorted.copy()
+        for i in range(kNumIterations):
+            step0 = np.max([eps, kRelStepSize * x[0]])
+            step1 = np.max([eps, kRelStepSize * x[1]])
+
+            dx = self.distort(x)
+
+            dx_0b = self.distort(np.array([x[0] - step0, x[1]]))
+            dx_0f = self.distort(np.array([x[0] + step0, x[1]]))
+            dx_1b = self.distort(np.array([x[0]        , x[1] - step1]))
+            dx_1f = self.distort(np.array([x[0]        , x[1] + step1]))
+            J[0, 0] = 1 + (dx_0f[0] - dx_0b[0]) / (2 * step0)
+            J[0, 1] = (dx_1f[0] - dx_1b[0]) / (2 * step1)
+            J[1, 0] = (dx_0f[1] - dx_0b[1]) / (2 * step0)
+            J[1, 1] = 1 + (dx_1f[1] - dx_1b[1]) / (2 * step1)
+    
+            step_x = np.linalg.inv(J) @ (dx - x0)
+            x -= step_x
+
+            squaren_norm = step_x[0]*step_x[0] + step_x[1]*step_x[1]
+            if squaren_norm < kMaxStepNorm:
+                break
+
+        return  x   # undistorted
+
+
+    def distort(self, p_cam_distorted: np.array):
         # see line 888 in https://github.com/colmap/colmap/blob/dev/src/base/camera_models.h
         camera_model_name = self.camera_intrinsics.camera_model_name
         distortions = self.camera_intrinsics.distortions
@@ -484,40 +580,32 @@ class Camera:
             p_cam_undistorted =  p_cam_distorted.copy()
 
         if camera_model_name == 'OPENCV5':
-            print('in ', p_cam_distorted)
+            # See https://learnopencv.com/understanding-lens-distortion/
             k1 = distortions[0]
             k2 = distortions[1]
             p1 = distortions[2]
             p2 = distortions[3] 
             k3 = distortions[4]
-            print(k1,k2,p1,p2,k3)
 
             xd = p_cam_distorted[0]
             yd = p_cam_distorted[1]
 
             x2 = xd*xd
             y2 = yd*yd
+            xy = xd*yd
             r2 = x2 + y2
             r4 = r2*r2
             r6 = r2*r4
 
             a = 1.0 + k1*r2  + k2*r4 + k3*r6
-            xu = a*xd + 2.0*p1*x2 + p2*(r2 + 2.0*x2)
-            yu = a*yd + p1*(r2+2.0*y2) + 2.0*p2*xd*yd
+            xu = a*xd + 2.0*p1*xy + p2*(r2 + 2.0*x2)
+            yu = a*yd + p1*(r2+2.0*y2) + 2.0*p2*xy
     
-        p_cam_undistorted = np.array([xu,yu])
+        p_cam_distorted = np.array([xu,yu])
 
-        return p_cam_undistorted
+        return p_cam_distorted
 
-    def project_camera_plane_to_image_plane(self, pc: np.array):
-        K = self.camera_intrinsics.K(use_homogenous_coordinates=False)
-        fx = K[0,0]
-        fy = K[1,1]
-        cx = K[0,2]
-        cy = K[1,2]
-        x_pix = fx*pc[0] + cx
-        y_pix = fy*pc[1] + cy
-        return np.array([x_pix, y_pix])
+
 
     def plot_camera_axis(self, vis_scale):
         """ plot the axis of the camera

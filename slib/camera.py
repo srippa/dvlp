@@ -168,6 +168,17 @@ class CameraIntrinsicts:
         return np.array(self._D)
 
     @staticmethod
+    def from_pinhole_model(fx: float, fy: float, cx:float, cy: float, width: int, height: int):
+        if fx == fy:
+            camera_model_name = 'SIMPLE_PINHOLE'
+            params = [fx, cx, cy]
+        else:
+            camera_model_name = 'PINHOLE'
+            params = [fx, fy, cx, cy]
+
+        return CameraIntrinsicts(camera_model_name,width, height, params)
+
+    @staticmethod
     def from_opencv_model(fx: float, fy: float, cx:float, cy: float, distortions: np.array, width: int, height: int):
         if not isinstance(distortions, list):
             if len(distortions.shape) == 2:
@@ -178,11 +189,9 @@ class CameraIntrinsicts:
         if len(distortions) == 4:
             camera_model_name = 'OPENCV'
             params += distortions
-            print('4 ', len(params))
         elif len(distortions) == 5:
             camera_model_name = 'OPENCV5'
             params += distortions
-            print('5 ', len(params))
         else:
             raise ValueError(f'Do not support opencv model with {len(distortions)} parameters')
 
@@ -260,8 +269,7 @@ class CameraIntrinsicts:
         )
 
     def __str__(self):
-        s  = f'Camera: {self.camera_type}\n'
-        s += f'  model: {self.camera_model_name}\n'
+        s  = f'Camera: {self.camera_model_name}\n'
         s += f'  w,h={self.width,self.height}\n'
         s += f'  params: {self.params}\n'
         s += f'  cx,cy= ({self.cx},{self.cy})\n'
@@ -318,6 +326,187 @@ class CameraIntrinsicts:
             height=new_height, 
             params=new_params
         )
+
+    def get_optimal_new_camera_matrix(self, alpha):
+        """_summary_
+
+        Args:
+            alpha (float): A number between 0 and 1, If the value is 
+               alpha = 0 --> when all the pixels in the undistorted image are valid
+               alpha = 1 --> when all the source image pixels are retained in the undistorted image but with many black pixels 
+            new_image_size (_type_, optional): _description_. Defaults to None.
+        """
+        # See cvGetOptimalNewCameraMatrix in line 2714 of https://github.com/opencv/opencv/blob/4.x/modules/calib3d/src/calibration.cpp
+        # See https://docs.opencv.org/3.3.0/dc/dbb/tutorial_py_calibration.html
+
+        outer, inner = self.icv_get_rectangles()
+
+        new_image_width = self.width
+        new_image_height = self.height
+   
+        # Projection mapping inner rectangle to viewport
+        fx0 = (new_image_width-1)/ inner.width
+        fy0 = (new_image_height-1)/ inner.height
+        cx0 = -fx0 * inner.x
+        cy0 = -fy0 * inner.y
+
+        # Projection mapping outer rectangle to viewport
+        fx1 = (new_image_width-1)/ outer.width
+        fy1 = (new_image_height-1)/ outer.height
+        cx1 = -fx1 * outer.x
+        cy1 = -fy1 * outer.y
+
+        # Interpolate between the two optimal projections
+        fx = fx0*(1 - alpha) + fx1*alpha
+        fy = fy0*(1 - alpha) + fy1*alpha
+        cx = cx0*(1 - alpha) + cx1*alpha
+        cy = cy0*(1 - alpha) + cy1*alpha
+
+        new_params = [fx,fy,cx,cy]
+        return CameraIntrinsicts(
+            camera_model_name='PINHOLE', 
+            width=new_image_width, 
+            height=new_image_height, 
+            params=new_params
+        )
+
+    def project_camera_plane_to_image_plane(self, pc: np.array):
+        K = self.K(use_homogenous_coordinates=False)
+        fx = K[0,0]
+        fy = K[1,1]
+        cx = K[0,2]
+        cy = K[1,2]
+        x_pix = fx*pc[0] + cx
+        y_pix = fy*pc[1] + cy
+        return np.array([x_pix, y_pix])
+
+    def project_image_plane_to_camera_plane(self, pu: np.array):
+        K = self.K(use_homogenous_coordinates=False)
+        fx = K[0,0]
+        fy = K[1,1]
+        cx = K[0,2]
+        cy = K[1,2]
+        
+        xc = (pu[0] - cx)/fx
+        yc = (pu[1] - cy)/fy
+        return np.array([xc, yc])
+
+    def undistort(self, pc_distorted: np.array):
+        # see line 565 in https://github.com/colmap/colmap/blob/dev/src/base/camera_models.h
+        eps =np.finfo(np.float64).eps
+
+        kNumIterations = 100
+        kMaxStepNorm = np.float32(1e-10)
+        kRelStepSize = np.float32(1e-6)
+
+        J = np.eye(2)
+        x0 = pc_distorted.copy()
+        x = pc_distorted.copy()
+        for i in range(kNumIterations):
+            step0 = np.max([eps, kRelStepSize * x[0]])
+            step1 = np.max([eps, kRelStepSize * x[1]])
+
+            dx = self.distort(x)
+
+            dx_0b = self.distort(np.array([x[0] - step0, x[1]]))
+            dx_0f = self.distort(np.array([x[0] + step0, x[1]]))
+            dx_1b = self.distort(np.array([x[0]        , x[1] - step1]))
+            dx_1f = self.distort(np.array([x[0]        , x[1] + step1]))
+            J[0, 0] = 1 + (dx_0f[0] - dx_0b[0]) / (2 * step0)
+            J[0, 1] = (dx_1f[0] - dx_1b[0]) / (2 * step1)
+            J[1, 0] = (dx_0f[1] - dx_0b[1]) / (2 * step0)
+            J[1, 1] = 1 + (dx_1f[1] - dx_1b[1]) / (2 * step1)
+    
+            step_x = np.linalg.inv(J) @ (dx - x0)
+            x -= step_x
+
+            squaren_norm = step_x[0]*step_x[0] + step_x[1]*step_x[1]
+            if squaren_norm < kMaxStepNorm:
+                break
+
+        return  x   # undistorted
+
+
+    def distort(self, p_cam_distorted: np.array):
+        # see line 888 in https://github.com/colmap/colmap/blob/dev/src/base/camera_models.h
+        camera_model_name = self.camera_model_name
+        distortions = self.distortions
+
+        if camera_model_name == 'SIMPLE_PINHOLE' or camera_model_name == 'PINHOLE':
+            p_cam_undistorted =  p_cam_distorted.copy()
+
+        if camera_model_name == 'OPENCV5':
+            # See https://learnopencv.com/understanding-lens-distortion/
+            k1 = distortions[0]
+            k2 = distortions[1]
+            p1 = distortions[2]
+            p2 = distortions[3] 
+            k3 = distortions[4]
+
+            xd = p_cam_distorted[0]
+            yd = p_cam_distorted[1]
+
+            x2 = xd*xd
+            y2 = yd*yd
+            xy = xd*yd
+            r2 = x2 + y2
+            r4 = r2*r2
+            r6 = r2*r4
+
+            a = 1.0 + k1*r2  + k2*r4 + k3*r6
+            xu = a*xd + 2.0*p1*xy + p2*(r2 + 2.0*x2)
+            yu = a*yd + p1*(r2+2.0*y2) + 2.0*p2*xy
+    
+        p_cam_distorted = np.array([xu,yu])
+
+        return p_cam_distorted
+
+    def icv_get_rectangles(self):
+        # see icvGetRectangles, line 2460 in https://github.com/opencv/opencv/blob/4.x/modules/calib3d/src/calibration.cpp
+        N = 9
+        x_step = self.w / (N-1)
+        y_step = self.h / (N-1)
+
+        # Get a grid over [w,h] image in original, distorted, coordinates
+        xu = []
+        yu = []
+        xu_left = []
+        xu_right = []
+        yu_bottom = [] 
+        yu_top = []         
+        for y in range(N):
+            yp = y*y_step
+            for x in range(N):
+                xp = x*x_step
+                ps = np.array([xp,yp])
+                pc_distorted = self.project_image_plane_to_camera_plane(ps)                # from 2d pixel coordinates to 2D camera plane
+                pc_undistorted = self.undistort(pc_distorted)                              # undistors with inverse lens distortions
+
+                x_undistorted = pc_undistorted[0]
+                y_undistorted = pc_undistorted[1]
+
+                xu.append(x_undistorted)
+                yu.append(y_undistorted)
+                if x == 0: xu_left.append(x_undistorted)
+                if x == N-1: xu_right.append(x_undistorted)
+                if y == 0: yu_top.append(y_undistorted)
+                if y == N-1: yu_bottom.append(y_undistorted)
+
+
+        xmin_o = np.min(xu)
+        xmax_o = np.max(xu)
+        ymin_o = np.min(yu)
+        ymax_o = np.max(yu)
+        outer = edict(x=xmin_o, y=ymin_o, width=xmax_o-xmin_o, height=ymax_o-ymin_o)
+
+
+        xmin_i = np.max(xu_left)
+        xmax_i = np.min(xu_right)
+        ymin_i = np.max(yu_top)
+        ymax_i = np.min(yu_bottom)
+        inner = edict(x=xmin_i, y=ymin_i, width=xmax_i-xmin_i, height=ymax_i-ymin_i)
+
+        return outer, inner
 
     def get_fov(self):
         # Zeliltsky 2.60
@@ -403,26 +592,6 @@ class Camera:
 
         return Camera(camera_intrinsics, R, translation_vector)
 
-    def project_camera_plane_to_image_plane(self, pc: np.array):
-        K = self.camera_intrinsics.K(use_homogenous_coordinates=False)
-        fx = K[0,0]
-        fy = K[1,1]
-        cx = K[0,2]
-        cy = K[1,2]
-        x_pix = fx*pc[0] + cx
-        y_pix = fy*pc[1] + cy
-        return np.array([x_pix, y_pix])
-
-    def project_image_plane_to_camera_plane(self, pu: np.array):
-        K = self.camera_intrinsics.K(use_homogenous_coordinates=False)
-        fx = K[0,0]
-        fy = K[1,1]
-        cx = K[0,2]
-        cy = K[1,2]
-        
-        xc = (pu[0] - cx)/fx
-        yc = (pu[1] - cy)/fy
-        return np.array([xc, yc])
 
     def project_3d(self, pw: np.array):
         """project a 3D vector by a pure pinhole projection
@@ -476,8 +645,8 @@ class Camera:
         # see line 854 in https://github.com/colmap/colmap/blob/dev/src/base/camera_models.h
 
         pc_undistorted, disparity = self.project_3d_to_camera_plane(pw)       # from3d world coordinates to 2D camera plane cordinates
-        pc_distorted = self.distort(pc_undistorted)                           # distort point using distortion coefficients and model
-        pu = self.project_camera_plane_to_image_plane(pc_distorted)           # transform to 2D pixel coordinates
+        pc_distorted = self.camera_intrinsics.distort(pc_undistorted)                           # distort point using distortion coefficients and model
+        pu = self.camera_intrinsics.project_camera_plane_to_image_plane(pc_distorted)           # transform to 2D pixel coordinates
 
         return pu, disparity
 
@@ -495,8 +664,8 @@ class Camera:
         Returns:
             np.array: _description_
         """
-        pc_distorted = self.project_image_plane_to_camera_plane(pu)                # from 2d pixel coordinates to 2D camera plane
-        pc_undistorted = self.undistort(pc_distorted)                              # undistors with inverse lens distortions
+        pc_distorted = self.camera_intrinsics.project_image_plane_to_camera_plane(pu)                # from 2d pixel coordinates to 2D camera plane
+        pc_undistorted = self.camera_intrinsics.undistort(pc_distorted)                              # undistors with inverse lens distortions
         p3d = self.project_camera_plane_to_3d(pc_undistorted, disparity)           # from 2D camera plane to 3D point, usign the disparity (inverse depth)
 
         return p3d
@@ -536,74 +705,8 @@ class Camera:
         #   clalls WarpImageBetweenCameras
         pass
 
-    def undistort(self, pc_distorted: np.array):
-        eps =np.finfo(np.float64).eps
-
-        kNumIterations = 100
-        kMaxStepNorm = np.float32(1e-10)
-        kRelStepSize = np.float32(1e-6)
-
-        J = np.eye(2)
-        x0 = pc_distorted.copy()
-        x = pc_distorted.copy()
-        for i in range(kNumIterations):
-            step0 = np.max([eps, kRelStepSize * x[0]])
-            step1 = np.max([eps, kRelStepSize * x[1]])
-
-            dx = self.distort(x)
-
-            dx_0b = self.distort(np.array([x[0] - step0, x[1]]))
-            dx_0f = self.distort(np.array([x[0] + step0, x[1]]))
-            dx_1b = self.distort(np.array([x[0]        , x[1] - step1]))
-            dx_1f = self.distort(np.array([x[0]        , x[1] + step1]))
-            J[0, 0] = 1 + (dx_0f[0] - dx_0b[0]) / (2 * step0)
-            J[0, 1] = (dx_1f[0] - dx_1b[0]) / (2 * step1)
-            J[1, 0] = (dx_0f[1] - dx_0b[1]) / (2 * step0)
-            J[1, 1] = 1 + (dx_1f[1] - dx_1b[1]) / (2 * step1)
-    
-            step_x = np.linalg.inv(J) @ (dx - x0)
-            x -= step_x
-
-            squaren_norm = step_x[0]*step_x[0] + step_x[1]*step_x[1]
-            if squaren_norm < kMaxStepNorm:
-                break
-
-        return  x   # undistorted
 
 
-    def distort(self, p_cam_distorted: np.array):
-        # see line 888 in https://github.com/colmap/colmap/blob/dev/src/base/camera_models.h
-        camera_model_name = self.camera_intrinsics.camera_model_name
-        distortions = self.camera_intrinsics.distortions
-
-        if camera_model_name == 'SIMPLE_PINHOLE' or camera_model_name == 'PINHOLE':
-            p_cam_undistorted =  p_cam_distorted.copy()
-
-        if camera_model_name == 'OPENCV5':
-            # See https://learnopencv.com/understanding-lens-distortion/
-            k1 = distortions[0]
-            k2 = distortions[1]
-            p1 = distortions[2]
-            p2 = distortions[3] 
-            k3 = distortions[4]
-
-            xd = p_cam_distorted[0]
-            yd = p_cam_distorted[1]
-
-            x2 = xd*xd
-            y2 = yd*yd
-            xy = xd*yd
-            r2 = x2 + y2
-            r4 = r2*r2
-            r6 = r2*r4
-
-            a = 1.0 + k1*r2  + k2*r4 + k3*r6
-            xu = a*xd + 2.0*p1*xy + p2*(r2 + 2.0*x2)
-            yu = a*yd + p1*(r2+2.0*y2) + 2.0*p2*xy
-    
-        p_cam_distorted = np.array([xu,yu])
-
-        return p_cam_distorted
 
 
 
@@ -721,3 +824,307 @@ class Cameras:
             ipv = c.plot(vis_scale, show_image)
 
         return ipv
+
+    def get_new_camera(self):
+        undistorted_camera = CameraIntrinsicts.from_pinhole_model(self.fx, self.fy, self.cx, self.cy, width=self.width, height=self.height)
+
+
+                
+
+# Camera UndistortCamera(const UndistortCameraOptions& options,
+#                 const Camera& camera) {
+#   CHECK_GE(options.blank_pixels, 0);
+#   CHECK_LE(options.blank_pixels, 1);
+#   CHECK_GT(options.min_scale, 0.0);
+#   CHECK_LE(options.min_scale, options.max_scale);
+#   CHECK_NE(options.max_image_size, 0);
+#   CHECK_GE(options.roi_min_x, 0.0);
+#   CHECK_GE(options.roi_min_y, 0.0);
+#   CHECK_LE(options.roi_max_x, 1.0);
+#   CHECK_LE(options.roi_max_y, 1.0);
+#   CHECK_LT(options.roi_min_x, options.roi_max_x);
+#   CHECK_LT(options.roi_min_y, options.roi_max_y);
+
+#   Camera undistorted_camera;
+#   undistorted_camera.SetModelId(PinholeCameraModel::model_id);
+#   undistorted_camera.SetWidth(camera.Width());
+#   undistorted_camera.SetHeight(camera.Height());
+
+#   // Copy focal length parameters.
+#   const std::vector<size_t>& focal_length_idxs = camera.FocalLengthIdxs();
+#   CHECK_LE(focal_length_idxs.size(), 2)
+#       << "Not more than two focal length parameters supported.";
+#   if (focal_length_idxs.size() == 1) {
+#     undistorted_camera.SetFocalLengthX(camera.FocalLength());
+#     undistorted_camera.SetFocalLengthY(camera.FocalLength());
+#   } else if (focal_length_idxs.size() == 2) {
+#     undistorted_camera.SetFocalLengthX(camera.FocalLengthX());
+#     undistorted_camera.SetFocalLengthY(camera.FocalLengthY());
+#   }
+
+#   // Copy principal point parameters.
+#   undistorted_camera.SetPrincipalPointX(camera.PrincipalPointX());
+#   undistorted_camera.SetPrincipalPointY(camera.PrincipalPointY());
+
+#   // Modify undistorted camera parameters based on ROI if enabled
+#   size_t roi_min_x = 0;
+#   size_t roi_min_y = 0;
+#   size_t roi_max_x = camera.Width();
+#   size_t roi_max_y = camera.Height();
+
+#   const bool roi_enabled = options.roi_min_x > 0.0 || options.roi_min_y > 0.0 ||
+#                            options.roi_max_x < 1.0 || options.roi_max_y < 1.0;
+
+#   if (roi_enabled) {
+#     roi_min_x = static_cast<size_t>(
+#         std::round(options.roi_min_x * static_cast<double>(camera.Width())));
+#     roi_min_y = static_cast<size_t>(
+#         std::round(options.roi_min_y * static_cast<double>(camera.Height())));
+#     roi_max_x = static_cast<size_t>(
+#         std::round(options.roi_max_x * static_cast<double>(camera.Width())));
+#     roi_max_y = static_cast<size_t>(
+#         std::round(options.roi_max_y * static_cast<double>(camera.Height())));
+
+#     // Make sure that the roi is valid.
+#     roi_min_x = std::min(roi_min_x, camera.Width() - 1);
+#     roi_min_y = std::min(roi_min_y, camera.Height() - 1);
+#     roi_max_x = std::max(roi_max_x, roi_min_x + 1);
+#     roi_max_y = std::max(roi_max_y, roi_min_y + 1);
+
+#     undistorted_camera.SetWidth(roi_max_x - roi_min_x);
+#     undistorted_camera.SetHeight(roi_max_y - roi_min_y);
+
+#     undistorted_camera.SetPrincipalPointX(camera.PrincipalPointX() -
+#                                           static_cast<double>(roi_min_x));
+#     undistorted_camera.SetPrincipalPointY(camera.PrincipalPointY() -
+#                                           static_cast<double>(roi_min_y));
+#   }
+
+#   // Scale the image such the the boundary of the undistorted image.
+#   if (roi_enabled || (camera.ModelId() != SimplePinholeCameraModel::model_id &&
+#                       camera.ModelId() != PinholeCameraModel::model_id)) {
+#     // Determine min/max coordinates along top / bottom image border.
+
+#     double left_min_x = std::numeric_limits<double>::max();
+#     double left_max_x = std::numeric_limits<double>::lowest();
+#     double right_min_x = std::numeric_limits<double>::max();
+#     double right_max_x = std::numeric_limits<double>::lowest();
+
+#     for (size_t y = roi_min_y; y < roi_max_y; ++y) {
+#       // Left border.
+#       const Eigen::Vector2d world_point1 =
+#           camera.ImageToWorld(Eigen::Vector2d(0.5, y + 0.5));
+#       const Eigen::Vector2d undistorted_point1 =
+#           undistorted_camera.WorldToImage(world_point1);
+#       left_min_x = std::min(left_min_x, undistorted_point1(0));
+#       left_max_x = std::max(left_max_x, undistorted_point1(0));
+#       // Right border.
+#       const Eigen::Vector2d world_point2 =
+#           camera.ImageToWorld(Eigen::Vector2d(camera.Width() - 0.5, y + 0.5));
+#       const Eigen::Vector2d undistorted_point2 =
+#           undistorted_camera.WorldToImage(world_point2);
+#       right_min_x = std::min(right_min_x, undistorted_point2(0));
+#       right_max_x = std::max(right_max_x, undistorted_point2(0));
+#     }
+
+#     // Determine min, max coordinates along left / right image border.
+
+#     double top_min_y = std::numeric_limits<double>::max();
+#     double top_max_y = std::numeric_limits<double>::lowest();
+#     double bottom_min_y = std::numeric_limits<double>::max();
+#     double bottom_max_y = std::numeric_limits<double>::lowest();
+
+#     for (size_t x = roi_min_x; x < roi_max_x; ++x) {
+#       // Top border.
+#       const Eigen::Vector2d world_point1 =
+#           camera.ImageToWorld(Eigen::Vector2d(x + 0.5, 0.5));
+#       const Eigen::Vector2d undistorted_point1 =
+#           undistorted_camera.WorldToImage(world_point1);
+#       top_min_y = std::min(top_min_y, undistorted_point1(1));
+#       top_max_y = std::max(top_max_y, undistorted_point1(1));
+#       // Bottom border.
+#       const Eigen::Vector2d world_point2 =
+#           camera.ImageToWorld(Eigen::Vector2d(x + 0.5, camera.Height() - 0.5));
+#       const Eigen::Vector2d undistorted_point2 =
+#           undistorted_camera.WorldToImage(world_point2);
+#       bottom_min_y = std::min(bottom_min_y, undistorted_point2(1));
+#       bottom_max_y = std::max(bottom_max_y, undistorted_point2(1));
+#     }
+
+#     const double cx = undistorted_camera.PrincipalPointX();
+#     const double cy = undistorted_camera.PrincipalPointY();
+
+#     // Scale such that undistorted image contains all pixels of distorted image.
+#     const double min_scale_x =
+#         std::min(cx / (cx - left_min_x),
+#                  (undistorted_camera.Width() - 0.5 - cx) / (right_max_x - cx));
+#     const double min_scale_y = std::min(
+#         cy / (cy - top_min_y),
+#         (undistorted_camera.Height() - 0.5 - cy) / (bottom_max_y - cy));
+
+#     // Scale such that there are no blank pixels in undistorted image.
+#     const double max_scale_x =
+#         std::max(cx / (cx - left_max_x),
+#                  (undistorted_camera.Width() - 0.5 - cx) / (right_min_x - cx));
+#     const double max_scale_y = std::max(
+#         cy / (cy - top_max_y),
+#         (undistorted_camera.Height() - 0.5 - cy) / (bottom_min_y - cy));
+
+#     // Interpolate scale according to blank_pixels.
+#     double scale_x = 1.0 / (min_scale_x * options.blank_pixels +
+#                             max_scale_x * (1.0 - options.blank_pixels));
+#     double scale_y = 1.0 / (min_scale_y * options.blank_pixels +
+#                             max_scale_y * (1.0 - options.blank_pixels));
+
+#     // Clip the scaling factors.
+#     scale_x = Clip(scale_x, options.min_scale, options.max_scale);
+#     scale_y = Clip(scale_y, options.min_scale, options.max_scale);
+
+#     // Scale undistorted camera dimensions.
+#     const size_t orig_undistorted_camera_width = undistorted_camera.Width();
+#     const size_t orig_undistorted_camera_height = undistorted_camera.Height();
+#     undistorted_camera.SetWidth(static_cast<size_t>(
+#         std::max(1.0, scale_x * undistorted_camera.Width())));
+#     undistorted_camera.SetHeight(static_cast<size_t>(
+#         std::max(1.0, scale_y * undistorted_camera.Height())));
+
+#     // Scale the principal point according to the new dimensions of the camera.
+#     undistorted_camera.SetPrincipalPointX(
+#         undistorted_camera.PrincipalPointX() *
+#         static_cast<double>(undistorted_camera.Width()) /
+#         static_cast<double>(orig_undistorted_camera_width));
+#     undistorted_camera.SetPrincipalPointY(
+#         undistorted_camera.PrincipalPointY() *
+#         static_cast<double>(undistorted_camera.Height()) /
+#         static_cast<double>(orig_undistorted_camera_height));
+#   }
+
+#   if (options.max_image_size > 0) {
+#     const double max_image_scale_x =
+#         options.max_image_size /
+#         static_cast<double>(undistorted_camera.Width());
+#     const double max_image_scale_y =
+#         options.max_image_size /
+#         static_cast<double>(undistorted_camera.Height());
+#     const double max_image_scale =
+#         std::min(max_image_scale_x, max_image_scale_y);
+#     if (max_image_scale < 1.0) {
+#       undistorted_camera.Rescale(max_image_scale);
+#     }
+#   }
+
+#   return undistorted_camera;
+# }
+
+def get_test_camera():
+    import os
+    import sys
+    from pathlib import Path
+    import cv2
+
+    root_dir = Path(os.getcwd()).parent
+    if str(root_dir) not in sys.path:
+        sys.path.insert(0,str(root_dir))
+    else:
+        print('PATH O.K.')
+
+    img_dir = root_dir /'images' / 'calibration'
+    img_file = img_dir / 'left03.jpg'
+    img = cv2.imread(str(img_file))
+    h,  w = img.shape[:2]
+
+    # data rteken from OpenCv tutorial : https://docs.opencv.org/3.3.0/dc/dbb/tutorial_py_calibration.html
+    #  and data                        : https://github.com/opencv/opencv/tree/master/samples/data (left01.jpg - left14.j)
+    distortions = np.array(
+        [
+        [-2.6637260909660682e-01], 
+        [-3.8588898922304653e-02], 
+        [1.7831947042852964e-03], 
+        [-2.8122100441115472e-04], 
+        [2.3839153080878486e-01]
+        ]
+    )
+
+    mtx = np.array(
+        [
+            [5.3591573396163199e+02, 0.,                     3.4228315473308373e+02],
+            [0.,                     5.3591573396163199e+02, 2.3557082909788173e+02],
+            [0.,                     0.,                     1.]
+        ]
+    )
+
+    fx = mtx[0,0]
+    fy = mtx[1,1]
+    cx = mtx[0,2]
+    cy = mtx[1,2]
+    ci = CameraIntrinsicts.from_opencv_model(fx,fy,cx,cy,distortions,w, h)
+
+    return mtx, distortions, ci, img
+
+if __name__ == '__main__':
+
+    mtx, distortions, ci, img =  get_test_camera()
+    h,  w = img.shape[:2]
+    alpha = 0.0
+
+    no_rot = np.array([[0.0], [0.0], [0.0]])
+    no_trans = np.array([[0.0], [0.0], [0.0]])
+    K = ci.K()[:3,:3]
+
+    # Test that pixel to camere plane and distortiom/undistortion works as expected
+    #   undistortPoints 
+    print('Testing compatibility with OpenCv undistort, project_points')
+    print('Testing that undistort is the reverse of distort')
+
+    for xi in [0, 50, 100, 200, 300, 400, 640]:
+        for yi in [0,100,200,400, 480]:
+            pi  = np.array([float(xi), float(yi)])              # original (distorted) coordimnates
+
+            pc = ci.project_image_plane_to_camera_plane(pi)     # to camera plane
+            p_undistorted = ci.undistort(pc)                    # undistort
+ 
+            # Test competability with OpenCv undistort 
+            cv_undistorted =  cv2.undistortPoints(pi, K, distortions).squeeze()
+            err_to_cv_undistort = np.linalg.norm(p_undistorted-cv_undistorted)
+            if err_to_cv_undistort > 1e-4:
+                print(p_undistorted, cv_undistorted, err_to_cv_undistort)
+
+            # revert previous transformation
+            pd = ci.distort(p_undistorted)                      # distort
+            pi1 = ci.project_camera_plane_to_image_plane(pd)    # to image 
+
+            # compare to OpenCv implementation
+            pw = np.array([p_undistorted[0], p_undistorted[1], 1.0, 1.0])   # lift to wrld coordinates with disparty (z) 1, identity rigid tramsformation
+            pp, _ =  cv2.projectPoints(pw[:3],                              # project to image
+                                        no_rot,
+                                        no_trans,
+                                        mtx,
+                                        distortions)
+
+    
+            dist_to_opencv = np.linalg.norm(pp-pi1)          # check that OpenCV projection from camera coordinate system is teh same as self
+            if dist_to_opencv > 1e-5:
+                print(f'error between opencv projection and self: {dist_to_opencv}')
+
+            dist_undist_err = np.linalg.norm(pc-pd)          # check that undistort is the inverse of distort
+            pixel_err = np.linalg.norm(pi-pi1)               # check the whole image --> camera plane and back 
+            if dist_undist_err > 1e-4 or pixel_err > 0.01:
+                print(f'dist err : {dist_undist_err}. PIxel errors {pixel_err}')
+
+    print('Comparing impelementation of get_optimal_new_camera_matrix to OpenCv getOptimalNewCameraMatrix')
+    for alpha in [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]:
+        new_matrix, roi = cv2.getOptimalNewCameraMatrix(
+            mtx,
+            distortions,
+            (w,h),
+            alpha=alpha
+        )
+        # print(new_matrix)
+        # print(roi)
+
+        new_camera = ci.get_optimal_new_camera_matrix(alpha=alpha)
+        # print(new_camera)
+
+        err_new_matrix = np.linalg.norm(new_camera.K()[:3,:3]-new_matrix)
+        if err_new_matrix > 0.02:
+            print(err_new_matrix)

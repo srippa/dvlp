@@ -370,6 +370,8 @@ class CameraIntrinsicts:
             params=new_params
         )
 
+
+
     def project_camera_plane_to_image_plane(self, pc: np.array):
         K = self.K(use_homogenous_coordinates=False)
         fx = K[0,0]
@@ -706,10 +708,6 @@ class Camera:
         pass
 
 
-
-
-
-
     def plot_camera_axis(self, vis_scale):
         """ plot the axis of the camera
 
@@ -829,192 +827,22 @@ class Cameras:
         undistorted_camera = CameraIntrinsicts.from_pinhole_model(self.fx, self.fy, self.cx, self.cy, width=self.width, height=self.height)
 
 
-                
+def init_undistort_rectify_map(camera_inrinsics: CameraIntrinsicts, new_camera_intrinsic: CameraIntrinsicts):
+    # See https://docs.opencv.org/3.4/da/d54/group__imgproc__transform.html#ga7dfb72c9cf9780a347fbe3d1c47e5d5a
+    # code - line 64 in https://github.com/egonSchiele/OpenCV/blob/master/modules/imgproc/src/undistort.cpp
+    mapx = np.zeros((new_camera_intrinsic.h, new_camera_intrinsic.w))
+    mapy = np.zeros((new_camera_intrinsic.h, new_camera_intrinsic.w))
+    for u in range(new_camera_intrinsic.w):
+        for v in range(new_camera_intrinsic.h):
+            pi = np.array([float(u), float(v)])
+            p_undistorted = new_camera_intrinsic.project_image_plane_to_camera_plane(pi)
 
-# Camera UndistortCamera(const UndistortCameraOptions& options,
-#                 const Camera& camera) {
-#   CHECK_GE(options.blank_pixels, 0);
-#   CHECK_LE(options.blank_pixels, 1);
-#   CHECK_GT(options.min_scale, 0.0);
-#   CHECK_LE(options.min_scale, options.max_scale);
-#   CHECK_NE(options.max_image_size, 0);
-#   CHECK_GE(options.roi_min_x, 0.0);
-#   CHECK_GE(options.roi_min_y, 0.0);
-#   CHECK_LE(options.roi_max_x, 1.0);
-#   CHECK_LE(options.roi_max_y, 1.0);
-#   CHECK_LT(options.roi_min_x, options.roi_max_x);
-#   CHECK_LT(options.roi_min_y, options.roi_max_y);
+            p_distorted = camera_inrinsics.distort(p_undistorted)
+            pix = camera_inrinsics.project_camera_plane_to_image_plane(p_distorted)
+            mapx[v,u] = pix[0]
+            mapy[v,u] = pix[1]
 
-#   Camera undistorted_camera;
-#   undistorted_camera.SetModelId(PinholeCameraModel::model_id);
-#   undistorted_camera.SetWidth(camera.Width());
-#   undistorted_camera.SetHeight(camera.Height());
-
-#   // Copy focal length parameters.
-#   const std::vector<size_t>& focal_length_idxs = camera.FocalLengthIdxs();
-#   CHECK_LE(focal_length_idxs.size(), 2)
-#       << "Not more than two focal length parameters supported.";
-#   if (focal_length_idxs.size() == 1) {
-#     undistorted_camera.SetFocalLengthX(camera.FocalLength());
-#     undistorted_camera.SetFocalLengthY(camera.FocalLength());
-#   } else if (focal_length_idxs.size() == 2) {
-#     undistorted_camera.SetFocalLengthX(camera.FocalLengthX());
-#     undistorted_camera.SetFocalLengthY(camera.FocalLengthY());
-#   }
-
-#   // Copy principal point parameters.
-#   undistorted_camera.SetPrincipalPointX(camera.PrincipalPointX());
-#   undistorted_camera.SetPrincipalPointY(camera.PrincipalPointY());
-
-#   // Modify undistorted camera parameters based on ROI if enabled
-#   size_t roi_min_x = 0;
-#   size_t roi_min_y = 0;
-#   size_t roi_max_x = camera.Width();
-#   size_t roi_max_y = camera.Height();
-
-#   const bool roi_enabled = options.roi_min_x > 0.0 || options.roi_min_y > 0.0 ||
-#                            options.roi_max_x < 1.0 || options.roi_max_y < 1.0;
-
-#   if (roi_enabled) {
-#     roi_min_x = static_cast<size_t>(
-#         std::round(options.roi_min_x * static_cast<double>(camera.Width())));
-#     roi_min_y = static_cast<size_t>(
-#         std::round(options.roi_min_y * static_cast<double>(camera.Height())));
-#     roi_max_x = static_cast<size_t>(
-#         std::round(options.roi_max_x * static_cast<double>(camera.Width())));
-#     roi_max_y = static_cast<size_t>(
-#         std::round(options.roi_max_y * static_cast<double>(camera.Height())));
-
-#     // Make sure that the roi is valid.
-#     roi_min_x = std::min(roi_min_x, camera.Width() - 1);
-#     roi_min_y = std::min(roi_min_y, camera.Height() - 1);
-#     roi_max_x = std::max(roi_max_x, roi_min_x + 1);
-#     roi_max_y = std::max(roi_max_y, roi_min_y + 1);
-
-#     undistorted_camera.SetWidth(roi_max_x - roi_min_x);
-#     undistorted_camera.SetHeight(roi_max_y - roi_min_y);
-
-#     undistorted_camera.SetPrincipalPointX(camera.PrincipalPointX() -
-#                                           static_cast<double>(roi_min_x));
-#     undistorted_camera.SetPrincipalPointY(camera.PrincipalPointY() -
-#                                           static_cast<double>(roi_min_y));
-#   }
-
-#   // Scale the image such the the boundary of the undistorted image.
-#   if (roi_enabled || (camera.ModelId() != SimplePinholeCameraModel::model_id &&
-#                       camera.ModelId() != PinholeCameraModel::model_id)) {
-#     // Determine min/max coordinates along top / bottom image border.
-
-#     double left_min_x = std::numeric_limits<double>::max();
-#     double left_max_x = std::numeric_limits<double>::lowest();
-#     double right_min_x = std::numeric_limits<double>::max();
-#     double right_max_x = std::numeric_limits<double>::lowest();
-
-#     for (size_t y = roi_min_y; y < roi_max_y; ++y) {
-#       // Left border.
-#       const Eigen::Vector2d world_point1 =
-#           camera.ImageToWorld(Eigen::Vector2d(0.5, y + 0.5));
-#       const Eigen::Vector2d undistorted_point1 =
-#           undistorted_camera.WorldToImage(world_point1);
-#       left_min_x = std::min(left_min_x, undistorted_point1(0));
-#       left_max_x = std::max(left_max_x, undistorted_point1(0));
-#       // Right border.
-#       const Eigen::Vector2d world_point2 =
-#           camera.ImageToWorld(Eigen::Vector2d(camera.Width() - 0.5, y + 0.5));
-#       const Eigen::Vector2d undistorted_point2 =
-#           undistorted_camera.WorldToImage(world_point2);
-#       right_min_x = std::min(right_min_x, undistorted_point2(0));
-#       right_max_x = std::max(right_max_x, undistorted_point2(0));
-#     }
-
-#     // Determine min, max coordinates along left / right image border.
-
-#     double top_min_y = std::numeric_limits<double>::max();
-#     double top_max_y = std::numeric_limits<double>::lowest();
-#     double bottom_min_y = std::numeric_limits<double>::max();
-#     double bottom_max_y = std::numeric_limits<double>::lowest();
-
-#     for (size_t x = roi_min_x; x < roi_max_x; ++x) {
-#       // Top border.
-#       const Eigen::Vector2d world_point1 =
-#           camera.ImageToWorld(Eigen::Vector2d(x + 0.5, 0.5));
-#       const Eigen::Vector2d undistorted_point1 =
-#           undistorted_camera.WorldToImage(world_point1);
-#       top_min_y = std::min(top_min_y, undistorted_point1(1));
-#       top_max_y = std::max(top_max_y, undistorted_point1(1));
-#       // Bottom border.
-#       const Eigen::Vector2d world_point2 =
-#           camera.ImageToWorld(Eigen::Vector2d(x + 0.5, camera.Height() - 0.5));
-#       const Eigen::Vector2d undistorted_point2 =
-#           undistorted_camera.WorldToImage(world_point2);
-#       bottom_min_y = std::min(bottom_min_y, undistorted_point2(1));
-#       bottom_max_y = std::max(bottom_max_y, undistorted_point2(1));
-#     }
-
-#     const double cx = undistorted_camera.PrincipalPointX();
-#     const double cy = undistorted_camera.PrincipalPointY();
-
-#     // Scale such that undistorted image contains all pixels of distorted image.
-#     const double min_scale_x =
-#         std::min(cx / (cx - left_min_x),
-#                  (undistorted_camera.Width() - 0.5 - cx) / (right_max_x - cx));
-#     const double min_scale_y = std::min(
-#         cy / (cy - top_min_y),
-#         (undistorted_camera.Height() - 0.5 - cy) / (bottom_max_y - cy));
-
-#     // Scale such that there are no blank pixels in undistorted image.
-#     const double max_scale_x =
-#         std::max(cx / (cx - left_max_x),
-#                  (undistorted_camera.Width() - 0.5 - cx) / (right_min_x - cx));
-#     const double max_scale_y = std::max(
-#         cy / (cy - top_max_y),
-#         (undistorted_camera.Height() - 0.5 - cy) / (bottom_min_y - cy));
-
-#     // Interpolate scale according to blank_pixels.
-#     double scale_x = 1.0 / (min_scale_x * options.blank_pixels +
-#                             max_scale_x * (1.0 - options.blank_pixels));
-#     double scale_y = 1.0 / (min_scale_y * options.blank_pixels +
-#                             max_scale_y * (1.0 - options.blank_pixels));
-
-#     // Clip the scaling factors.
-#     scale_x = Clip(scale_x, options.min_scale, options.max_scale);
-#     scale_y = Clip(scale_y, options.min_scale, options.max_scale);
-
-#     // Scale undistorted camera dimensions.
-#     const size_t orig_undistorted_camera_width = undistorted_camera.Width();
-#     const size_t orig_undistorted_camera_height = undistorted_camera.Height();
-#     undistorted_camera.SetWidth(static_cast<size_t>(
-#         std::max(1.0, scale_x * undistorted_camera.Width())));
-#     undistorted_camera.SetHeight(static_cast<size_t>(
-#         std::max(1.0, scale_y * undistorted_camera.Height())));
-
-#     // Scale the principal point according to the new dimensions of the camera.
-#     undistorted_camera.SetPrincipalPointX(
-#         undistorted_camera.PrincipalPointX() *
-#         static_cast<double>(undistorted_camera.Width()) /
-#         static_cast<double>(orig_undistorted_camera_width));
-#     undistorted_camera.SetPrincipalPointY(
-#         undistorted_camera.PrincipalPointY() *
-#         static_cast<double>(undistorted_camera.Height()) /
-#         static_cast<double>(orig_undistorted_camera_height));
-#   }
-
-#   if (options.max_image_size > 0) {
-#     const double max_image_scale_x =
-#         options.max_image_size /
-#         static_cast<double>(undistorted_camera.Width());
-#     const double max_image_scale_y =
-#         options.max_image_size /
-#         static_cast<double>(undistorted_camera.Height());
-#     const double max_image_scale =
-#         std::min(max_image_scale_x, max_image_scale_y);
-#     if (max_image_scale < 1.0) {
-#       undistorted_camera.Rescale(max_image_scale);
-#     }
-#   }
-
-#   return undistorted_camera;
-# }
+    return mapx, mapy
 
 def get_test_camera():
     import os
@@ -1061,6 +889,21 @@ def get_test_camera():
 
     return mtx, distortions, ci, img
 
+
+# tests
+# See also https://github.com/maxcrous/multiview_notebooks/blob/main/3_stereo_geometry.ipynb
+#   https://learnopencv.com/understanding-lens-distortion/
+#   https://github.com/mint-lab/3dv_tutorial
+#   invitaiton to 3D: https://docs.google.com/viewer?url=https%3A%2F%2Fwww.eecis.udel.edu%2F~cer%2Farv%2Freadings%2Fold_mkss.pdf&pdf=true
+# https://github.com/subeeshvasu/Awesome-Image-Distortion-Correction
+#
+# OpenCv remap vs pytorch grod_map
+#    https://discuss.pytorch.org/t/cv2-remap-in-pytorch/99354/2
+#    https://gist.github.com/sftekin/d5ddf65e54e3dfe89a308c624e62280b
+#    https://www.programcreek.com/python/example/104458/torch.nn.functional.grid_sample
+#    https://pytorch.org/docs/stable/generated/torch.nn.functional.grid_sample.html
+#    https://arxiv.org/abs/1506.02025
+#      https://pytorch.org/tutorials/intermediate/spatial_transformer_tutorial.html
 if __name__ == '__main__':
 
     mtx, distortions, ci, img =  get_test_camera()
@@ -1113,7 +956,7 @@ if __name__ == '__main__':
 
     print('Comparing impelementation of get_optimal_new_camera_matrix to OpenCv getOptimalNewCameraMatrix')
     for alpha in [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]:
-        new_matrix, roi = cv2.getOptimalNewCameraMatrix(
+        new_matrix_cv, roi = cv2.getOptimalNewCameraMatrix(
             mtx,
             distortions,
             (w,h),
@@ -1125,6 +968,25 @@ if __name__ == '__main__':
         new_camera = ci.get_optimal_new_camera_matrix(alpha=alpha)
         # print(new_camera)
 
-        err_new_matrix = np.linalg.norm(new_camera.K()[:3,:3]-new_matrix)
+        err_new_matrix = np.linalg.norm(new_camera.K()[:3,:3]-new_matrix_cv)
         if err_new_matrix > 0.02:
             print(err_new_matrix)
+
+    # Test equivalence of undistortion maps to OpenCv
+    map_x, map_y = init_undistort_rectify_map(ci, new_camera)
+
+    opencv_mapx, opencv_mapy = cv2.initUndistortRectifyMap(
+        mtx, 
+        distortions,
+        None,
+        new_camera.K()[:3,:3],
+        (new_camera.w,new_camera.h),
+        cv2.CV_32FC1
+    )
+
+    ex = np.linalg.norm(map_x-opencv_mapx)
+    ey = np.linalg.norm(map_y-opencv_mapy)
+    if ex > 0.01 or ey > 0.01:
+        print(map_x[0,0], opencv_mapx[0,0] )
+        print(map_y[0,0], opencv_mapy[0,0] )
+        print(f'err-x={ex}, err-y={ey}')
